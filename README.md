@@ -53,18 +53,30 @@ trimestrielle, variation 2021 → 2025 (CTE + agrégation conditionnelle), prix 
 ### Modèle de prédiction
 
 Prédiction du prix au m² à partir de l'arrondissement, de la surface, du nombre de pièces, du type
-de bien, de la présence d'une dépendance, de la localisation et de la date. Trois approches comparées
-sur le même jeu de test (20 %) :
+de bien, de la présence d'une dépendance, de la localisation et de la date, puis ajout de variables
+de **prix du voisinage** ([`src/voisinage.py`](src/voisinage.py)) : prix médian au m² des 10, 30 et
+100 ventes les plus proches et des autres ventes du même immeuble, ajustés de l'évolution du marché.
+Pour éviter toute fuite de données, ces variables sont calculées hors échantillon (validation croisée
+en 5 blocs) : une vente ne sert jamais à décrire son propre prix.
+
+Comparaison sur le même jeu de test (20 %) :
 
 |                                            |   MAE (€/m²) | Erreur relative moyenne   |    R² |
 |:-------------------------------------------|-------------:|:--------------------------|------:|
 | Référence (médiane arrondissement × année) |         1875 | 19.0%                     | 0.268 |
 | Régression linéaire                        |         1874 | 19.4%                     | 0.297 |
 | Gradient boosting                          |         1699 | 17.5%                     | 0.4   |
+| Gradient boosting + prix du voisinage      |         1672 | 16.8%                     | 0.411 |
 
-Le gradient boosting réduit l'erreur de 9 % par rapport à la médiane de l'arrondissement.
-Le R² reste modeste (0,40) : DVF ne contient ni l'étage, ni l'état du bien, ni le DPE, qui
-expliquent une grande partie des écarts de prix au sein d'un même quartier.
+Le modèle retenu ramène l'erreur relative de 19,0 % à 16,8 % par rapport à la médiane de
+l'arrondissement. Le gain apporté par le voisinage reste limité, car la latitude et la longitude
+captent déjà l'essentiel de l'effet géographique. Le R² reste modeste (0,41) : DVF ne contient ni
+l'étage, ni l'état du bien, ni le DPE, qui expliquent une grande partie des écarts de prix au sein
+d'un même quartier.
+
+Dans le dashboard, l'estimateur accepte une adresse, géocodée avec le
+[géocodeur national](https://geoservices.ign.fr/documentation/services/services-geoplateforme/geocodage)
+(IGN / Base Adresse Nationale), pour tirer parti des ventes voisines.
 
 ![Prédictions](output/figures/predictions.png)
 

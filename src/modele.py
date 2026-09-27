@@ -1,4 +1,4 @@
-"""Entraîne un modèle de prédiction du prix au m² et le compare à deux références.
+"""Entraîne un modèle de prédiction du prix au m² et le compare à des références.
 
 Usage :
     python src/modele.py   # -> models/modele_prix.joblib + output/modele.md
@@ -6,21 +6,27 @@ Usage :
 Modèles comparés (même découpage apprentissage / test) :
 - référence : prix médian au m² de l'arrondissement pour l'année ;
 - régression linéaire (variables catégorielles encodées) ;
-- gradient boosting (HistGradientBoostingRegressor), retenu s'il est le meilleur.
+- gradient boosting (HistGradientBoostingRegressor) sur les mêmes variables ;
+- gradient boosting + prix du voisinage (src/voisinage.py), entraîné sur log(prix au m²).
+Le modèle qui a la plus faible erreur absolue moyenne est sauvegardé pour le dashboard.
 """
 
+import sys
 from pathlib import Path
 
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.compose import ColumnTransformer
+from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # `src.voisinage`, importable aussi par app.py
+from src.voisinage import PrixVoisinage  # noqa: E402
 
 DATA = Path("data/processed/transactions.parquet")
 MODEL_PATH = Path("models/modele_prix.joblib")
@@ -29,6 +35,7 @@ PREDICTIONS = Path("output/tables/predictions_test.csv")
 
 CATEGORICAL = ["arrondissement", "type_local"]
 NUMERIC = ["surface", "pieces", "dependance", "latitude", "longitude", "periode"]
+LOCALISATION = ["latitude", "longitude", "periode"]  # entrées de PrixVoisinage
 FEATURES = CATEGORICAL + NUMERIC
 TARGET = "prix_m2"
 
@@ -60,7 +67,26 @@ def build_models() -> dict:
         ),
         HistGradientBoostingRegressor(max_iter=500, learning_rate=0.05, random_state=42),
     )
-    return {"Régression linéaire": linear, "Gradient boosting": boosting}
+    # Prix du voisinage + cible en log : l'erreur porte sur des écarts relatifs, comme les prix.
+    voisinage = TransformedTargetRegressor(
+        regressor=make_pipeline(
+            ColumnTransformer(
+                [
+                    ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), CATEGORICAL),
+                    ("num", "passthrough", NUMERIC),
+                    ("voisinage", PrixVoisinage(), LOCALISATION),
+                ]
+            ),
+            HistGradientBoostingRegressor(max_iter=500, learning_rate=0.05, random_state=42),
+        ),
+        func=np.log,
+        inverse_func=np.exp,
+    )
+    return {
+        "Régression linéaire": linear,
+        "Gradient boosting": boosting,
+        "Gradient boosting + prix du voisinage": voisinage,
+    }
 
 
 def baseline_predict(train: pd.DataFrame, test: pd.DataFrame) -> np.ndarray:
@@ -108,12 +134,16 @@ def main() -> None:
             [
                 "# Modèle de prédiction du prix au m²",
                 "",
-                f"Découpage aléatoire : {len(train):,} ventes pour l'apprentissage, "
+                f"Découpage aléatoire : {len(train):,} ventes pour l'apprentissage ; "
                 f"{len(test):,} pour le test.".replace(",", " "),
                 "",
                 table.to_markdown(),
                 "",
                 f"Modèle retenu : **{best}**.",
+                "",
+                "*Prix du voisinage* : prix médian au m² des 10, 30 et 100 ventes les plus proches et prix "
+                "des autres ventes du même immeuble, ajustés de l'évolution du marché et calculés hors "
+                "échantillon (une vente ne sert jamais à décrire son propre prix).",
             ]
         )
         + "\n",

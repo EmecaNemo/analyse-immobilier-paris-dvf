@@ -10,12 +10,14 @@ from pathlib import Path
 
 import joblib
 import pandas as pd
+import requests
 import streamlit as st
 
 from src.graphiques import GEOJSON, arr_label, carte, evolution, heatmap, predictions, variation
 
 TABLES = Path("output/tables")
 MODEL_PATH = Path("models/modele_prix.joblib")
+GEOCODEUR = "https://data.geopf.fr/geocodage/search"
 
 st.set_page_config(page_title="Immobilier parisien (DVF)", page_icon="🏠", layout="wide")
 
@@ -35,6 +37,22 @@ def centroids() -> dict[int, tuple[float, float]]:
     """Centre (lat, lon) de chaque arrondissement, utilisé par l'estimateur."""
     features = json.loads(GEOJSON.read_text(encoding="utf-8"))["features"]
     return {f["properties"]["c_ar"]: (f["properties"]["geom_x_y"]["lat"], f["properties"]["geom_x_y"]["lon"]) for f in features}
+
+
+@st.cache_data(show_spinner=False)
+def geocoder(adresse: str) -> dict | None:
+    """Adresse -> {label, arrondissement, lat, lon} via le géocodeur national (IGN / BAN), Paris uniquement."""
+    try:
+        r = requests.get(GEOCODEUR, params={"q": adresse, "limit": 1}, timeout=5)
+        r.raise_for_status()
+        features = r.json()["features"]
+    except (requests.RequestException, ValueError, KeyError):
+        return None
+    if not features or not features[0]["properties"].get("citycode", "").startswith("751"):
+        return None
+    f = features[0]
+    lon, lat = f["geometry"]["coordinates"]
+    return {"label": f["properties"]["label"], "arrondissement": int(f["properties"]["citycode"][-2:]), "lat": lat, "lon": lon}
 
 
 def euros(x: float) -> str:
@@ -100,12 +118,20 @@ with tab_estim:
     bundle = load_model()
     left, right = st.columns([1, 1])
     with left:
-        arr = st.selectbox("Arrondissement", list(range(1, 21)), index=10, format_func=arr_label)
+        adresse = st.text_input("Adresse (facultatif)", placeholder="ex. 10 rue de la Roquette")
+        lieu = geocoder(adresse + ", Paris") if adresse.strip() else None
+        if lieu:
+            arr, lat, lon = lieu["arrondissement"], lieu["lat"], lieu["lon"]
+            st.caption(f"📍 {lieu['label']}")
+        else:
+            if adresse.strip():
+                st.warning("Adresse introuvable à Paris : estimation au centre de l'arrondissement.")
+            arr = st.selectbox("Arrondissement", list(range(1, 21)), index=10, format_func=arr_label)
+            lat, lon = centroids()[arr]
         surface = st.number_input("Surface (m²)", min_value=9, max_value=400, value=50, step=1)
         pieces = st.number_input("Nombre de pièces", min_value=1, max_value=10, value=2, step=1)
         type_local = st.radio("Type de bien", ["Appartement", "Maison"], horizontal=True)
         dependance = st.checkbox("Avec cave ou parking")
-    lat, lon = centroids()[arr]
     today = date.today()
     X = pd.DataFrame(
         [
@@ -127,7 +153,9 @@ with tab_estim:
         st.metric("Prix au m² estimé", euros(prix_m2))
         st.caption(
             f"Modèle : {bundle['name']} (scikit-learn). Erreur moyenne sur le jeu de test : ±17 % environ. "
-            "Estimation indicative : l'étage, l'état du bien ou le DPE ne figurent pas dans les données DVF."
+            "Avec une adresse, le modèle s'appuie sur les ventes voisines ; sans adresse, sur le centre "
+            "de l'arrondissement. Estimation indicative : l'étage, l'état du bien ou le DPE ne figurent "
+            "pas dans les données DVF."
         )
     if "predictions_test" in t:
         st.plotly_chart(predictions(t["predictions_test"]), width="stretch")
